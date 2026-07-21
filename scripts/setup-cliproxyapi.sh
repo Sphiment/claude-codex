@@ -22,8 +22,8 @@ case "$(uname -s)" in
 esac
 
 case "$(uname -m)" in
-  x86_64|amd64) release_arch_regex="amd64|x86_64" ;;
-  aarch64|arm64) release_arch_regex="arm64|aarch64" ;;
+  x86_64|amd64) release_arch="amd64"; release_arch_regex="amd64|x86_64" ;;
+  aarch64|arm64) release_arch="arm64"; release_arch_regex="arm64|aarch64" ;;
   *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -53,8 +53,15 @@ for asset in json.load(sys.stdin).get("assets", []):
         break
 ' "$release_os" "$release_arch_regex")"
 else
-  echo "Install jq or python3 so the GitHub release metadata can be parsed." >&2
-  exit 127
+  if [[ "$VERSION" == "latest" ]]; then
+    latest_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$REPOSITORY/releases/latest")"
+    release_tag="${latest_url##*/}"
+  else
+    release_tag="$VERSION"
+  fi
+  release_tag="${release_tag#v}"
+  asset_url="https://github.com/$REPOSITORY/releases/download/v$release_tag/CLIProxyAPI_${release_tag}_${release_os}_${release_arch}.tar.gz"
+  echo "Using the standard release asset path because jq/python3 is unavailable."
 fi
 
 if [[ -z "$asset_url" || "$asset_url" == "null" ]]; then

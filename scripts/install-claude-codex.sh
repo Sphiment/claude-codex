@@ -10,7 +10,16 @@ UTILITY="$TARGET_DIR/claude-codex"
 UTILITY_SOURCE="$PROJECT_ROOT/bin/claude-codex"
 
 canonical_path() {
-  readlink -f "$1" 2>/dev/null || printf '%s\n' "$1"
+  local source="$1"
+  while [[ -L "$source" ]]; do
+    local source_dir
+    source_dir="$(cd -P "$(dirname "$source")" && pwd)"
+    source="$(readlink "$source")"
+    [[ "$source" == /* ]] || source="$source_dir/$source"
+  done
+  local source_dir
+  source_dir="$(cd -P "$(dirname "$source")" && pwd)"
+  printf '%s/%s\n' "$source_dir" "$(basename "$source")"
 }
 
 if [[ ! -x "$WRAPPER" ]]; then
