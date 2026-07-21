@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+resolve_script_dir() {
+  local source="$1"
+  while [[ -L "$source" ]]; do
+    local source_dir
+    source_dir="$(cd -P "$(dirname "$source")" && pwd)"
+    source="$(readlink "$source")"
+    [[ "$source" == /* ]] || source="$source_dir/$source"
+  done
+  cd -P "$(dirname "$source")" && pwd
+}
+
+PROJECT_ROOT="$(cd "$(resolve_script_dir "${BASH_SOURCE[0]}")/.." && pwd)"
+
+case "${1:-}" in
+  login)
+    shift
+    exec "$PROJECT_ROOT/scripts/codex-login.sh" "$@"
+    ;;
+  setup)
+    exec "$PROJECT_ROOT/scripts/setup-claude-codex.sh"
+    ;;
+  status)
+    proxy_url="${CLIPROXYAPI_URL:-http://127.0.0.1:8317}"
+    if ! command -v curl >/dev/null 2>&1; then
+      echo "curl is required for status checks." >&2
+      exit 127
+    fi
+    curl -fsS --max-time 2 \
+      -H "Authorization: Bearer ${CLIPROXYAPI_CLIENT_KEY:-sk-dummy}" \
+      "$proxy_url/v1/models"
+    ;;
+  *)
+    cat >&2 <<'EOF'
+Usage: claude-codex <command>
+
+Commands:
+  login [--no-browser]  Authenticate CLIProxyAPI with a ChatGPT/Codex account
+  setup                  Re-run the local setup steps
+  status                 Check the local proxy model endpoint
+EOF
+    exit 2
+    ;;
+esac

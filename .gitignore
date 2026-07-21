@@ -1,0 +1,4 @@
+.cliproxyapi/
+config/static/
+*.log
+.DS_Store

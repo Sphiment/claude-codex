@@ -1,0 +1,13 @@
+# Local-only CLIProxyAPI configuration for claude --codex.
+host: "127.0.0.1"
+port: 8317
+auth-dir: "~/.cli-proxy-api"
+api-keys:
+  - "sk-dummy"
+remote-management:
+  allow-remote: false
+  disable-control-panel: true
+ws-auth: true
+codex-instructions-enabled: false
+routing:
+  strategy: "round-robin"

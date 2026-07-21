@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# This wrapper preserves the regular Claude Code CLI and adds an opt-in
+# --codex mode backed by the local CLIProxyAPI instance.
+
+resolve_script_dir() {
+  local source="$1"
+  while [[ -L "$source" ]]; do
+    local source_dir
+    source_dir="$(cd -P "$(dirname "$source")" && pwd)"
+    source="$(readlink "$source")"
+    [[ "$source" == /* ]] || source="$source_dir/$source"
+  done
+  cd -P "$(dirname "$source")" && pwd
+}
+
+SCRIPT_DIR="$(resolve_script_dir "${BASH_SOURCE[0]}")"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+canonical_path() {
+  if command -v readlink >/dev/null 2>&1; then
+    readlink -f "$1" 2>/dev/null || printf '%s\n' "$1"
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+find_native_claude() {
+  if [[ -n "${CLAUDE_CODE_NATIVE_BIN:-}" ]]; then
+    printf '%s\n' "$CLAUDE_CODE_NATIVE_BIN"
+    return
+  fi
+
+  local candidate
+  for candidate in \
+    "${HOME:-}/.local/bin/claude-native" \
+    "${HOME:-}/.local/bin/claude-original" \
+    "${HOME:-}/.local/share/claude/versions/current"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  local current
+  current="$(command -v claude || true)"
+  if [[ -n "$current" ]] && [[ "$(canonical_path "$current")" != "$(canonical_path "$0")" ]]; then
+    printf '%s\n' "$current"
+    return
+  fi
+
+  return 1
+}
+
+native_claude="$(find_native_claude || true)"
+if [[ -z "$native_claude" ]] || [[ ! -x "$native_claude" ]]; then
+  echo "Unable to find the native Claude Code executable." >&2
+  echo "Set CLAUDE_CODE_NATIVE_BIN to its path, then retry." >&2
+  exit 127
+fi
+
+codex_mode=0
+for argument in "$@"; do
+  if [[ "$argument" == "--codex" ]]; then
+    codex_mode=1
+    break
+  fi
+done
+
+if ((codex_mode == 0)); then
+  exec "$native_claude" "$@"
+fi
+
+codex_model=""
+codex_effort=""
+model_seen=0
+effort_seen=0
+forwarded_args=()
+
+normalize_model() {
+  case "${1,,}" in
+    sol|opus|gpt-5.6-sol) printf '%s\n' "gpt-5.6-sol" ;;
+    terra|sonnet|gpt-5.6-terra) printf '%s\n' "gpt-5.6-terra" ;;
+    luna|haiku|gpt-5.6-luna) printf '%s\n' "gpt-5.6-luna" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+while (($# > 0)); do
+  case "$1" in
+    --codex)
+      shift
+      ;;
+    --codex-model)
+      if (($# < 2)); then
+        echo "--codex-model requires a model name" >&2
+        exit 2
+      fi
+      codex_model="$(normalize_model "$2")"
+      model_seen=1
+      shift 2
+      ;;
+    --codex-model=*)
+      codex_model="$(normalize_model "${1#*=}")"
+      model_seen=1
+      shift
+      ;;
+    --model|-m)
+      if (($# < 2)); then
+        echo "$1 requires a model name" >&2
+        exit 2
+      fi
+      codex_model="$(normalize_model "$2")"
+      model_seen=1
+      shift 2
+      ;;
+    --model=*)
+      codex_model="$(normalize_model "${1#*=}")"
+      model_seen=1
+      shift
+      ;;
+    --codex-effort)
+      if (($# < 2)); then
+        echo "--codex-effort requires an effort level" >&2
+        exit 2
+      fi
+      codex_effort="$2"
+      effort_seen=1
+      forwarded_args+=(--effort "$2")
+      shift 2
+      ;;
+    --codex-effort=*)
+      codex_effort="${1#*=}"
+      effort_seen=1
+      forwarded_args+=(--effort "$codex_effort")
+      shift
+      ;;
+    --effort)
+      if (($# < 2)); then
+        echo "--effort requires an effort level" >&2
+        exit 2
+      fi
+      codex_effort="$2"
+      effort_seen=1
+      forwarded_args+=(--effort "$2")
+      shift 2
+      ;;
+    --effort=*)
+      codex_effort="${1#*=}"
+      effort_seen=1
+      forwarded_args+=(--effort "$codex_effort")
+      shift
+      ;;
+    *)
+      forwarded_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if ((model_seen == 0)); then
+  codex_model="gpt-5.6-terra"
+fi
+if ((effort_seen == 0)); then
+  codex_effort="medium"
+  forwarded_args+=(--effort "$codex_effort")
+fi
+forwarded_args+=(--dangerously-skip-permissions --model "$codex_model")
+
+proxy_url="${CLIPROXYAPI_URL:-http://127.0.0.1:8317}"
+proxy_config="${CLIPROXYAPI_CONFIG:-$PROJECT_ROOT/config/cliproxyapi.yaml}"
+proxy_binary="${CLIPROXYAPI_BIN:-$PROJECT_ROOT/.cliproxyapi/bin/cli-proxy-api}"
+proxy_client_key="${CLIPROXYAPI_CLIENT_KEY:-sk-dummy}"
+
+start_proxy_if_needed() {
+  # Tests and users who manage the proxy themselves can disable auto-start.
+  if [[ "${CLIPROXYAPI_AUTOSTART:-1}" == "0" ]]; then
+    return
+  fi
+
+  if command -v curl >/dev/null 2>&1 && curl -fsS --max-time 1 \
+    -H "Authorization: Bearer $proxy_client_key" \
+    "$proxy_url/v1/models" >/dev/null 2>&1; then
+    return
+  fi
+
+  if [[ ! -x "$proxy_binary" ]]; then
+    echo "CLIProxyAPI is not installed at $proxy_binary." >&2
+    echo "Run: bash $PROJECT_ROOT/scripts/setup-cliproxyapi.sh" >&2
+    exit 127
+  fi
+  if [[ ! -f "$proxy_config" ]]; then
+    echo "CLIProxyAPI config is missing at $proxy_config." >&2
+    exit 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is required to check the local CLIProxyAPI server." >&2
+    exit 127
+  fi
+
+  local log_path="${CLIPROXYAPI_LOG:-$PROJECT_ROOT/.cliproxyapi/cliproxyapi.log}"
+  mkdir -p "$(dirname "$log_path")"
+  "$proxy_binary" --config "$proxy_config" >"$log_path" 2>&1 &
+  local proxy_pid=$!
+
+  for _ in {1..50}; do
+    if curl -fsS --max-time 1 \
+      -H "Authorization: Bearer $proxy_client_key" \
+      "$proxy_url/v1/models" >/dev/null 2>&1; then
+      return
+    fi
+    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+      echo "CLIProxyAPI exited during startup. See $log_path" >&2
+      exit 1
+    fi
+    sleep 0.2
+  done
+
+  echo "CLIProxyAPI did not become ready at $proxy_url." >&2
+  echo "See $log_path for details." >&2
+  exit 1
+}
+
+start_proxy_if_needed
+
+export ANTHROPIC_BASE_URL="$proxy_url"
+export ANTHROPIC_AUTH_TOKEN="$proxy_client_key"
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_DEFAULT_OPUS_MODEL="gpt-5.6-sol"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="gpt-5.6-terra"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="gpt-5.6-luna"
+
+exec "$native_claude" "${forwarded_args[@]}"
